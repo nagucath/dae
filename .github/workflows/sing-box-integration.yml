@@ -1,0 +1,64 @@
+name: Embedded dae with sing-box
+on:
+  push:
+    branches: ['rebase/incus-hotspot-*']
+    paths: ['.github/workflows/sing-box-integration.yml']
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      GOTOOLCHAIN: local
+      SOURCE: f5ad93cc
+      VERSION: 1.15.0-dev.20261119-nagucath.1
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: nagucath/sing-box
+          ref: audit/incus-hotspot-vendor-20261119
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Materialize the pinned sing-box vendor tree
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse --short=8 HEAD)" = "$SOURCE"
+          git submodule update --init --depth 1 third_party/dae third_party/tailscale
+          python3 tools/vendor/materialize.py --keep-work
+          python3 tools/vendor/verify.py --require-source
+          git add --intent-to-add --force vendor
+          git diff --binary -- go.mod go.sum deps/vendor-lock.json vendor > "$RUNNER_TEMP/regenerated-vendor.patch"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-vendor
+          path: ${{ runner.temp }}/regenerated-vendor.patch
+          if-no-files-found: error
+      - name: Test and build Linux with embedded dae
+        run: |
+          set -euo pipefail
+          tags="with_dae,$(cat release/DEFAULT_BUILD_TAGS_OTHERS)"
+          go test -mod=vendor -race -tags "$tags" -count=1 ./common/tls ./protocol/dae ./protocol/tailscale ./protocol/tun ./route/...
+          go vet -mod=vendor -tags "$tags" ./common/tls ./protocol/dae ./protocol/tailscale ./protocol/tun ./route/...
+          product="$RUNNER_TEMP/product"
+          mkdir "$product"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=vendor -trimpath -buildvcs=false \
+            -tags "$tags" -ldflags "$(cat release/LDFLAGS) -s -w -X github.com/sagernet/sing-box/constant.Version=$VERSION" \
+            -o "$product/sing-box" ./cmd/sing-box
+          "$product/sing-box" version
+          sudo env PATH="$PATH" GOTOOLCHAIN=local SING_BOX_DAE_BINARY="$product/sing-box" \
+            go test -mod=vendor -tags "$tags,integration" -run '^TestDAEInboundRealDatapath$' -count=1 -timeout=5m -v ./protocol/dae
+          git rev-parse HEAD > "$product/SOURCE_COMMIT"
+          cp deps/vendor-lock.json "$product/VENDOR_LOCK.json"
+          cd "$product"
+          sha256sum sing-box SOURCE_COMMIT VENDOR_LOCK.json > SHA256SUMS
+          tar -czf "$RUNNER_TEMP/sing-box-linux-amd64.tar.gz" sing-box SOURCE_COMMIT VENDOR_LOCK.json SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rebased-sing-box-linux-amd64
+          path: ${{ runner.temp }}/sing-box-linux-amd64.tar.gz
+          if-no-files-found: error
