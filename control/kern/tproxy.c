@@ -3385,6 +3385,17 @@ static __noinline int do_tproxy_lan_ingress(struct __sk_buff *skb, __u32 link_h_
 	if (capture_lan_udp_reply_bypassed(skb, pkt))
 		return TC_ACT_PIPE;
 
+#ifdef DAE_CAPTURE_ONLY
+	/* DHCP discovery is link-local control traffic. Keep it in the
+	 * LAN namespace so an unconfigured client can reach its lease server. */
+	if (pkt->ethh.h_proto == bpf_htons(ETH_P_IP) &&
+	    pkt->l4proto == IPPROTO_UDP &&
+	    pkt->tuples.five.sport == bpf_htons(68) &&
+	    pkt->tuples.five.dport == bpf_htons(67) &&
+	    pkt->tuples.five.dip.u6_addr32[3] == bpf_htonl(0xffffffffU))
+		return TC_ACT_PIPE;
+#endif
+
 	return tproxy_lan_ingress_role(skb, link_h_len, pkt);
 }
 
